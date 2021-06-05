@@ -1,0 +1,777 @@
+##-------------------------------------------------------------------------------------------------
+## title:  HW07 / Week 08 - Digit Recognition
+## author: Leonard Armstrong
+## date:   3/6/2019
+##-------------------------------------------------------------------------------------------------
+  
+
+##-------------------------------------------------------------------------------------------------
+## CLEAN START
+
+# Remove any non-default packages
+default_packages <- union(getOption("defaultPackages"), "base")
+loaded_packages <- .packages()
+extra_packages <- setdiff(x = loaded_packages, y = default_packages)
+invisible(
+  sapply(
+    X = extra_packages, 
+    FUN = function(x) detach(name = paste("package:", x, sep=""), character.only = TRUE)))
+
+# Remove all variables and functions from the global environment
+rm(list = ls())
+
+
+##-------------------------------------------------------------------------------------------------
+## LOAD LIBRARIES
+##
+## This section loads all required libraries.
+##
+## Library      | Purpose
+## ------------ | ---------------------------------------------------------------------
+## assertthat   | Create and manage assertions for ensuring proper states in the code.
+## class        | Classification routines (knn).
+## e1071        | Naive Bayes functionality.
+## ggplot2      | Graphing and plotting functions.
+## gridExtra    | Grid layout for graphics.
+## here         | Working directory utilities.
+## randomForest | Random forest functions.
+## RColorBrewer | Color palette definitions.
+## reshape      | Melt function.
+## scales       | ggplot2 axis scaling functions.
+## stringi      | String management functions.
+
+library(assertthat)
+library(class)
+library(e1071)
+library(ggplot2)
+library(gridExtra)
+library(here)
+library(randomForest)
+library(RColorBrewer)
+library(reshape)
+library(scales)
+library(stringi)
+
+
+##-------------------------------------------------------------------------------------------------
+## DEFINE KEY CONSTANTS AND OTHER DATA TO BE USED THROUGHOUT THE CODE
+
+# Define assertion error messages
+errmsg_trainfilenotexist <- "The specified training file does not exist."
+errmsg_testfilenotexist <- "The specified test file does not exist."
+
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+# Define the primary random seed (re)used throughout the script.
+random_seed <- 100163
+
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+# Define number of folds for k-folds testing.
+k_folds <- 10
+
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+# Define observation sizes
+image_height <- 28
+image_width  <- 28
+image_size   <- image_height * image_width
+record_size  <- image_size + 1              # Add one for the label field. 
+
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+# Define the relevant directories, file names, and file paths.
+cwd <- here::here()
+data_subdir <- "../data"
+
+# Define the training data file.
+training_filename <- "Kaggle-digit-train-sample-small-1400.csv"
+training_fullfilepath <- file.path(cwd, data_subdir, training_filename)
+assertthat::assert_that(file.exists(training_fullfilepath), msg = errmsg_trainfilenotexist)
+
+# Define the test data file.
+test_filename <- "Kaggle-digit-test-sample1000.csv"
+test_fullfilepath <- file.path(cwd, data_subdir, test_filename)
+assertthat::assert_that(file.exists(training_fullfilepath), msg = errmsg_trainfilenotexist)
+
+# Remove no-longer-needed variables.
+rm(training_filename, test_filename)
+
+
+##-------------------------------------------------------------------------------------------------
+## READ PROVIDED TRAINING DATA SET
+
+# Set the random seed
+set.seed(100163)
+
+# Define training data datatypes as numerics. Label is a factor and pixels are numeric.
+numeric_coltypes <- c("factor", rep(x = "numeric", times = image_size))  
+
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+# Review the training data set.
+
+# Read the training data and record the number of observations.
+train_num <- read.csv(
+  file = training_fullfilepath, header = TRUE, colClasses = numeric_coltypes, na.strings = "")
+
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+# Define key k-fold test sizes based on the training data size.
+
+# Get number of rows in training data set
+train_nrows <- nrow(train_num)
+
+# Now that we know the volume of data, define the size of a fold.
+fold_size <- round(train_nrows/k_folds)
+
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+# Review key values in the data set.
+
+# Verify the minimum and maximum pixel values.
+pixel_min <- min(train_num[, -1])
+pixel_max <- max(train_num[, -1])
+cat("The minumim training data value is", pixel_min, "\n")
+cat("The maximum training data value is", pixel_max, "\n")
+
+
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+## Shuffle the original data set before creating any subsequent data sets.
+
+set.seed(seed = random_seed)
+
+# Shuffle the base data set
+train_num <- train_num[sample(train_nrows), ]
+
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+# Create a binary_numeric training data set.
+
+train_binary <- data.frame(label = train_num$label, sign(train_num[, -1] > 32))
+
+
+##-------------------------------------------------------------------------------------------------
+## REVIEW AND CLEAN (IF NEEDED) PROVIDED DATA SETS
+##
+## In this section, the data sets will be reviewed for "cleanliness" and cleaned if needed.
+
+# Review NAs in the data
+cat("There are NAs in the decimal training data:", any(is.na(train_num)), "\n")
+cat("There are NAs in the binary training data:", any(is.na(train_binary)), "\n")
+
+
+##-------------------------------------------------------------------------------------------------
+## READ AND CLEAN PROVIDED TEST DATA SET
+
+# Read the test data.
+test_num <- read.csv(
+  file = test_fullfilepath, header = TRUE, colClasses = numeric_coltypes, na.strings = "")
+nas_in_test <- any(is.na(test_num))
+cat("The test data", ifelse(nas_in_test, "DOES", "does NOT"), "contain NA values.\n")
+if (nas_in_test) {
+  cat("Removing NA records...\n", sep = "")
+  test_num <- na.omit(test_num)
+  nas_in_test <- any(is.na(test_num))
+  cat("The test data", ifelse(nas_in_test, "DOES", "does NOT"), "contain NA values.\n")
+}
+
+# Create a binary test data set
+test_binary <- data.frame(label = test_num$label, sign(test_num[, -1] > 32))
+
+
+##-------------------------------------------------------------------------------------------------
+## EXPLORATORY DATA ANALYSIS - DATA SUMMARIES
+##
+## This section, consists of numeric exploratory analysis of the data.
+
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+# Summarize the labels
+
+# Show basic statistic summary of the training data.
+cat("Summary of the training data:\n", sep="")
+summary(as.numeric(levels(train_num$label)))
+cat("Standard deviation of the training data: ", sd(as.numeric(train_num$label)), "\n", sep="")
+
+# Review the means and standard deviations of each pixel and determine which pixels have zeros
+# for all training cases. 
+all_means <- apply(X=train_num[, -1], MARGIN = 2, FUN = mean)
+all_zeros <- all_means[all_means == 0]
+cat(NROW(all_zeros), " pixels have zeros for every record.\n", sep="")
+
+# Remove unnecessary data
+rm (all_means, all_sds, all_zeros)
+
+
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+# Review the distribution of values across all possible pixels. 
+
+# Turn the tabluar data into a longer data model.
+train_long <- melt(data = train_num)
+
+# Change range from 0-255 to 1-256 to avoind log(0) errors.
+train_long$value <- train_long$value + 1
+
+# Determine the distribution of values for all pixels
+distrib <- table(train_long$value)
+distrib_df <- data.frame(distrib, row.names = names(distrib))
+names(distrib_df) <- c("pixval", "frequency")
+
+# Create a historgram of the distribution of pixel values.
+# Set y-axis to log scale to magnify lower values.
+bar_breaks <- c(1, 10, 100, 1000, 10000, 100000, 1000000)
+gpixbar <- ggplot(data = distrib_df, mapping = aes(x = pixval, y = frequency, fill = frequency)) +
+  geom_col() + 
+  labs(
+    title = "Frequency of Possible Pixel Values Across All 1,097,600 Training Set Pixels",
+    subtitle = "1400 training set images × 784 pixels/image = 1,097,600 training set pixels",
+    x = "Pixel Value",
+    y = "Frequency") +
+  scale_y_log10(labels = scales::comma, breaks = bar_breaks) + 
+  scale_fill_gradient(low = "lightblue", high = "navy", trans = "log", breaks = bar_breaks) +
+  theme(axis.text.x=element_blank(), axis.ticks.x=element_blank()) +
+  theme(legend.position = "none")
+gpixbar
+
+
+##-------------------------------------------------------------------------------------------------
+## EXPLORATORY DATA ANALYSIS - DATA VISUALIZATIONS
+##
+## This section, consists of visual exploratory analysis of the data.
+
+# Create a support dataframe of labels, label counts and label percentages
+lcount <- table(train_num$label)
+lpct <- c(lcount/sum(lcount), use.names = FALSE)
+pctlab <- sprintf("%5.2f%%", lpct*100)
+pct_df <- data.frame(
+  name = rownames(lcount), 
+  count = lcount, 
+  pct = lpct, label = pctlab, 
+  use.name = FALSE)
+
+# Plot a bar chart of percentage used for each digit from the pct_df source.
+ghisto <- ggplot(data = pct_df, mapping = aes(x = name, y = pct, label = label)) +
+  geom_col(fill = "goldenrod") + 
+  geom_text(vjust = 2) +
+  scale_y_continuous(name = "Percentage", labels = scales::percent) +
+  labs(
+    title = "Distribution of Digit Representations Across 1400 Samples",
+    x = "Handwritten Digit",
+    fill = "Digit")
+
+# Display the plot.
+ghisto
+
+
+##-------------------------------------------------------------------------------------------------
+
+#' create_spread_plot - Generate a dot plot of the distribution of each digit across the input
+#'   data set.
+#'
+#' @param x Input data set assumed to have a field named "label"
+#' @param subtitle Subtitle for the plot to be returned.
+#'
+#' @return A dot plot of the digit distributions in the input data frame.
+#' @export
+#'
+#' @examples create_spread_plot(train_num, "Original distribution")
+create_spread_plot <- function (x, subtitle) {
+  # Create a helper dataframe consisting of the data index (row) as an integer and the
+  # data value (digit label) as a character string.
+  spread_df <- data.frame(
+    index = as.integer(1:nrow(x)), 
+    value = as.character(x[, "label"]), 
+    stringsAsFactors = FALSE)
+  # Create a dotplot from the spread_df helper dataframe.
+  gdot <- ggplot(data = spread_df, mapping = aes(x = value, y = index)) +
+    geom_point(size = 1) +
+    scale_y_continuous(name = "Observation", breaks = seq(from = 0, to = nrow(x), by = 100)) +
+    labs(
+      title = "Spread of Each Digit Across All Observations",
+      subtitle = subtitle,
+      x = "Digit")
+  # Return the generated dotplot
+  return(gdot)
+}
+
+# Plot the distribution of the original data.
+gdot_original <- create_spread_plot(train_num, "Original distribution")
+gdot_original
+
+# Now try shuffling and replotting
+train_num_shuffle1 <- train_num[sample(nrow(train_num)), ]
+gdot_shuffle1 <- create_spread_plot(train_num_shuffle1, "Suffled Distribution #1")
+gdot_shuffle1
+
+# Shuffle and replot one more time.
+train_num_shuffle2 <- train_num_shuffle1[sample(nrow(train_num_shuffle1)), ]
+gdot_shuffle2 <- create_spread_plot(train_num_shuffle2, "Suffled Distribution #2")
+gdot_shuffle2
+
+# Create a 1x2 grid display of the two shuffled plots.
+grid.arrange(gdot_shuffle1, gdot_shuffle2, nrow = 1)
+
+
+##-------------------------------------------------------------------------------------------------
+
+#' display_image - Display a digitized version of the hand-drawn image from a single observation.
+#'
+#' @param x Image record consisting of a label field and 784 pixel fields. 
+#'   This function requires that the pixel fields are numerics.
+#'
+#' @return A ggplot of the digitized image.
+#' @export
+#'
+#' @examples display_image(train_num[123,])
+display_image <- function (x) {
+  # Define error messages
+  emsg_recordlen <- "Incorrect record length sent to display_image. Expected 785 values."
+  emsg_vartype <- "Incorrect data types sent to display_image. Numeric pixel values expected."
+  
+  # Verify that a record of the proper length was input
+  assert_that(ncol(x) == 785, msg = emsg_recordlen)
+  # Verify that the pixel fields are all numeric.
+  assert_that(all(apply(X = x[, -1], MARGIN = 2, FUN=is.number)), msg = emsg_vartype)
+  
+  rownums <- as.vector(sapply(X=c(1:28), FUN= function(x) rep(x, times=28)))
+  colnums <- rep(c(1:28), times = 28)
+  df <- data.frame(drow = rownums, dcol = colnums, ddat = unlist(x[2:785]), row.names = NULL)
+  
+  g <- ggplot(data = df, mapping = aes(x = dcol, y = -drow, fill = ddat)) +
+    geom_tile() +
+    scale_fill_continuous(low = "white", high = "black") +
+    coord_fixed(ratio = 4/3) + 
+    theme(
+      legend.position = "none", 
+      axis.text.x=element_blank(), axis.ticks.x=element_blank(), 
+      axis.title.y=element_blank(), axis.text.y=element_blank(), axis.ticks.y=element_blank()) +
+    labs(x = paste("label = ", x$label, sep=""))
+  
+  return(g)
+}
+
+set.seed(random_seed)
+
+# Create a list of n random images.
+ilist <- list()
+num_images <- 28
+sample_value <- round(runif(n = num_images, min=1, max = 1400))
+for (i in 1:num_images) {
+  # Create an image graphic
+  ilist[[i]] <- display_image(train_num[sample_value[i],])
+}
+
+# Display a single digit.
+ilist[[16]]
+
+# Display all created images in a grid.
+g <- grid.arrange(
+  ilist[[1]], ilist[[2]], ilist[[3]], ilist[[4]], 
+  ilist[[5]], ilist[[6]], ilist[[7]], ilist[[8]],
+  ilist[[9]], ilist[[10]], ilist[[11]], ilist[[12]], 
+  ilist[[13]], ilist[[14]], ilist[[15]], ilist[[16]],
+  ilist[[17]], ilist[[18]], ilist[[19]], ilist[[20]],
+  ilist[[21]], ilist[[22]], ilist[[23]], ilist[[24]],
+  ilist[[25]], ilist[[26]], ilist[[27]], ilist[[28]],
+  nrow = 4)
+
+
+##-------------------------------------------------------------------------------------------------
+## RESULTS VISUALIZATION FUNCTIONS
+
+# FUNCTION: digit_model_heatmap
+#  PURPOSE: Generate a heatmap showing the success of a model at predicting digitized handwritten 
+#           images. Geneally this function is called with the output of a single fold. Therefore, 
+#           the reported percent success rate may not be equal to the comp
+#    PARAM: list_of_cats - A list of confusion matrices from all the k-folds runs of a model.
+#    PARAM: modelname - The name of the model that was executed as a character string. 
+#    PARAM: paramstr - A character string describing the specific parameters for the model.
+#  RETURNS: A ggplot of the success heatmap that was generated.
+
+digit_model_heatmap <- function (list_of_cmats, modelname, paramstr) {
+  
+  # Compute a single confusion matrix for the total results
+  total_results <- list_of_cmats[[1]]
+  for (i in 2:k_folds) {
+    total_results <- total_results + list_of_cmats[[i]] 
+  }
+  
+  # Create desired axis labels and label break points/
+  breaks1_10 <- c(0:9)
+  labels0_9  <- as.character(c(0:9))
+  
+  # Turn the confusion matrix into a long data frame.
+  verify_df <- melt(total_results)
+  names(verify_df) <- c("pred", "label", "freq")
+  
+  # Compute the overall success rate.
+  success_rate <- sum(diag(total_results))/sum(total_results) * 100
+  
+  # Create the heatmap plot
+  g <- ggplot(data = verify_df, mapping = aes(x = pred, y = label, fill = freq, label = freq)) +
+    geom_tile(color = "gray50") +
+    geom_text() +
+    scale_fill_gradient(low = "white", high = "navy") + 
+    scale_y_continuous(expand=c(0,0), breaks = breaks1_10, labels = labels0_9) +
+    scale_x_continuous(expand=c(0,0), breaks = breaks1_10, labels = labels0_9) +
+    labs(
+      title = sprintf("Success Map for Digit Recognition Using Model %s", modelname),
+      subtitle = sprintf("Parameter: %s\nSuccess rate = %5.02f%%", paramstr, success_rate),
+      x = "Predicted Value", 
+      y = "Test Label",
+      fill = "Volume")
+  
+  # Return the result
+  return(g)
+}
+
+
+##-------------------------------------------------------------------------------------------------
+## K-Nearest Neighbor Analysis
+#
+# Results for various k
+#  K | Result %
+#  - | ----------
+#  1 | 0.8914286
+#  3 | 0.8864286
+#  5 | 0.8921429 ***
+#  7 | 0.8850000
+#  9 | 0.8864286
+
+cat("Analysis #1: KNN.\n")
+
+# Set the random seed and assign the current k vaue.
+set.seed(random_seed)
+k <- 5
+
+# Initialize data structures to hold results.
+success <- vector(mode = "numeric")
+results <- list()
+
+# Perform k-folds testing
+for (i in 1:k_folds) {
+  # Define the range of indices to be held out for cross-validation
+  test_range <- c(floor(fold_size * (i - 1) + 1):floor(fold_size * i))
+  knn_train <- train_num[-test_range, -1]
+  knn_test <- train_num[test_range, -1]
+  knn_train_labels <- train_num$label[-test_range]
+  knn_test_labels <- train_num$label[test_range]
+  
+  # Run the KNN model. The model is tested in the same call in which it is trained. 
+  knn_model <- class::knn (train=knn_train, test=knn_test, cl=knn_train_labels, k=k, prob=TRUE)
+  # print(knn_model)
+  
+  # Generate, print and record the confusion matrix for the fold.
+  t <- (table(knn_model, knn_test_labels))
+  print(t)
+  results[[i]] <- t
+  
+  # Compute and save the success ratio
+  success <- c(success, sum(diag(t))/sum(t))
+  msg <- sprintf("Test %d: Percent predicted %5.1f%%\n", i, success[i]*100)
+  cat(msg, sep="")
+}
+
+# Report on the overall success percentage
+overall_success <- sum(success)/NROW(success)
+cat("Overall: ", round(overall_success*100, digits = 1), "% correctly predicted.\n", sep="")
+
+# Create the success map.
+ghm_knn <- digit_model_heatmap(results, "KNN", "k=5")
+ghm_knn
+
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# Generate a graphic plotting all KNN results.
+
+# Record all models executed and their results.
+model_variations <- data.frame(
+  k = c(1, 3, 5, 7, 9),
+  resultpct = c(0.8914286, 0.8864286, 0.8921429, 0.885, 0.8864286))
+
+# Create a dot & line plot of the results
+g_knn <- 
+  ggplot(
+    data=model_variations,
+    mapping=aes(x = k, y = resultpct, label = round(resultpct*100, 2) %s+% "%")) +
+  geom_point() +
+  geom_line(color = "gray", linetype = "dotted") +
+  geom_text(vjust = -2, size = 3) +
+  scale_x_continuous(breaks = model_variations$k) + 
+  scale_y_continuous(name = "Percent Correct", labels = scales::percent, limits = c(0.885, 0.895)) +
+  labs(
+    title = "Results of KNN Analysis",
+    subtitle = "Only variation was to K")
+g_knn
+
+
+rm(k, success, results, overall_success)
+rm(knn_train, knn_test, knn_train_labels, knn_test_labels, t)
+rm(test_range, knn_model)
+
+
+##-------------------------------------------------------------------------------------------------
+## SVM Analysis
+##
+## Run SVM 
+#
+# Results for various kernel, costs
+# Kernel     | Data    | Cost   | Coef0 | Result %
+# ---------- | ------- | ------ | ----- | ---------
+# polynomial | binary  |    1.0 |     0 | 11.929%
+# polynomial | binary  |    1.0 |  6000 | 11.929%
+# polynomial | binary  |  100.0 |     0 | 82.286%
+# polynomial | binary  |  250.0 |     0 | 91.143%
+# polynomial | binary  |  500.0 |     0 | 91.357%
+# polynomial | binary  | 1000.0 |     0 | 91.357%
+# polynomial | numeric |    0.1 |     0 | 90.643%
+# polynomial | numeric |    0.5 |     0 | 90.643%
+# polynomial | numeric |    1.0 |     0 | 90.643%
+# polynomial | numeric |    1.0 |  6000 | 92.071%
+# polynomial | numeric |    5.0 | -     | 90.643%
+# polynomial | numeric |   25.0 |   100 | 90.857%
+# polynomial | numeric |  250.0 |    50 | 90.643%
+# polynomial | numeric |  250.0 |   100 | 90.857%
+# polynomial | numeric |  250.0 |   250 | 90.857%
+# polynomial | numeric |  250.0 |  1000 | 91.429%
+# polynomial | numeric |  250.0 |  2000 | 91.929%
+# polynomial | numeric |  250.0 |  5000 | 91.929%
+# polynomial | numeric |  250.0 |  5500 | 91.929%
+# polynomial | numeric |  250.0 |  6000 | 92.071%
+# polynomial | numeric |  250.0 |  7000 | 91.929%
+# polynomial | numeric |  250.0 |  7500 | 91.571%
+# polynomial | numeric |  250.0 | 10000 | 91.214% 
+# polynomial | numeric | 2500.0 |  6000 | 92.071%
+# linear     | numeric |    0.1 | -     | 88.786%
+# linear     | numeric |    1.0 | -     | 88.786%
+# linear     | numeric |  100.0 | -     | 88.786%
+# linear     | numeric | 1000.0 | -     | 88.786%
+# linear     | numeric | 9000.0 | -     | 88.786%
+# sigmoid    | numeric |    0.1 |     0 | 11.929%
+# sigmoid    | numeric |    1.0 |     0 | 11.929%
+# sigmoid    | numeric |    1.0 |  1000 | 11.929%
+# sigmoid    | numeric |    1.0 |  5000 | 11.929%
+# sigmoid    | numeric |    1.0 | 10000 | 11.929%
+# sigmoid    | numeric |   10.0 |     0 | 11.929%
+# sigmoid    | numeric |  100.0 |     0 | 11.929%
+# sigmoid    | numeric | 9000.0 |     0 | 11.929%
+# sigmoid    | binary  |    1.0 |     0 | 85.143%
+# sigmoid    | binary  |   10.0 |     0 | 89.143%
+# sigmoid    | binary  |   15.0 |     0 | 89.643%
+# sigmoid    | binary  |   16.0 |     0 | 89.857%
+# sigmoid    | binary  |   17.0 |     0 | 89.571%
+# sigmoid    | binary  |   18.0 |     0 | 89.500%
+# sigmoid    | binary  |   25.0 |     0 | 89.000%
+# sigmoid    | binary  |   50.0 |     0 | 88.214%
+# sigmoid    | binary  |  100.0 |     0 | 88.143%
+# sigmoid    | binary  |  200.0 |     0 | 87.786%
+# sigmoid    | binary  | 1000.0 |     0 | 87.786%
+# sigmoid    | binary  | 5000.0 |     0 | 87.786%
+# sigmoid    | binary  | 9000.0 |     0 | 87.786%
+
+cat("Analysis #2: SVM\n")
+
+# Set the radom seed and define 3 of the 4 key parameters. The fourth parameter is set by altering
+# "train_num" to/from "train_binary" in three successive lines of the following code. 
+set.seed(random_seed)
+kernel <- "polynomial"
+c <- 1
+coef0 <- 6000
+
+# Initialize result reoprting data structures.
+success <- vector(mode = "numeric")
+results <- list()
+
+# Perform k-folds analysis
+for (i in 1:k_folds) {
+  # Define the range of indices to be held out for cross-validation
+  test_range <- c(floor(fold_size * (i - 1) + 1):floor(fold_size * i))
+  train <- train_num[-test_range, ]
+  test <- train_num[test_range, ]
+  test_labels <- train_num$label[test_range]
+  
+  # Generate the SVM model
+  svm_model <- e1071::svm(
+    formula = label~., data = train, kernel = kernel, cost = c, coef0 = coef0, scale = FALSE)
+  
+  # Perform a prediction with the test data
+  svm_pred <- predict(svm_model, test, type = "class")
+  
+  # Generate, print and record the confusion matrix
+  t <- (table(svm_pred, test_labels))
+  print(t)
+  results[[i]] <- t
+  
+  # Compute and save the success ratio
+  success <- c(success, sum(diag(t))/sum(t))
+  msg <- sprintf("Test %d: Percent predicted %5.1f%%\n", i, success[i]*100)
+  cat(msg, sep="")
+}
+
+# Report on the overall success percentage
+overall_success <- sum(success)/NROW(success)
+cat("Overall: ", round(overall_success*100, digits = 3), "% correctly predicted.\n", sep="")
+
+# Create the success map.
+ghm_svm<- digit_model_heatmap(
+  results, "SVM", "decimal numerics; kernel=polynomial; c=1, coef0=6000")
+ghm_svm
+
+
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# GENEREATE SVM RESULTS SCATTER PLOT REPORTS
+
+svm_results_filepath <- file.path(cwd, data_subdir, "svm_test_results.csv")
+assertthat::assert_that(file.exists(svm_results_filepath))
+
+# Read SVM experiment results
+svm_results <- read.csv(file = svm_results_filepath, header = TRUE)
+
+# Change all NA values of Coef0 to 0 - Coef0's default value.
+svm_results$Coef0[is.na(svm_results$Coef0)] <- 0
+
+# Get the max values
+best_values <- svm_results[svm_results$Result == max(svm_results$Result), ]
+
+# Create a base plot of all points.
+g_res_all <- 
+  ggplot(
+    data = svm_results, 
+    mapping = aes(x = Cost, y = Result, shape = Kernel, color = Data, size = Coef0)) +
+  geom_point() +
+  scale_x_log10() +
+  scale_shape_manual(values=c(3, 4, 1)) +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title = "Results of 50 SVM Tests for Handwritten Digit Recognition")
+g_res_all
+
+# Create a second plot by focusing only on the top portion of the base plot.
+g_res_top <- g_res_all + ylim(80, NA)  +
+  geom_label(
+    data = best_values, 
+    mapping = aes(label = Result %s+% "%"), 
+    size = 2.5, color = "black", nudge_x = 0.3)
+g_res_top
+
+# Remove no-longer-needed variables.
+rm(kernel, c, coef0)
+rm(success, results, overall_success)
+rm(train, test, test_labels, t, test_range)
+rm(svm_pred)
+rm (msg)
+rm(svm_results_filepath, svm_results)
+
+##-------------------------------------------------------------------------------------------------
+## Random Forest Analysis
+##
+## The analysis personally preferred by Forrest Gump. Bubba, on the other hand, has a liking
+## for SVMs. Who knew? 
+#
+# Results
+#
+# Data    | Trees | Result
+# ------- | ----- | ------
+# numeric |   500 | 91.500%
+# numeric |   350 | 91.571%
+# numeric |   340 | 91.143%
+# binary  |   500 | 91.857%
+# binary  |   430 | 92.000%
+# binary  |   385 | 91.786%
+
+cat("Analysis #3: Random Forest\n")
+
+# Set the random seed and the ntrees parameter. The remaining parameter is set by altering four
+# lines of the following code to/from train_num and train_binary.
+set.seed(random_seed)
+ntrees <- 430
+
+# Initialize results data structures.
+success <- vector(mode = "numeric")
+results <- list()
+
+# Perform k-folds analysis...
+for (i in 1:k_folds) {
+  # Define the range of indices to be held out for cross-validation
+  test_range <- c(floor(fold_size * (i - 1) + 1):floor(fold_size * i))
+  train <- train_binary[-test_range, -1]
+  test <- train_binary[test_range, -1]
+  train_labels <- train_binary$label[-test_range]
+  test_labels <- train_binary$label[test_range]
+  
+  # Run the random forest model. (Time the model as it is running to get a feel for the execution
+  # performance of the model.) Testing is performed along with creation of the model so there is no
+  # need for any subsequent calls to predict(). 
+  print(system.time(
+    rf_model <- randomForest::randomForest(
+      x = train, y = train_labels, 
+      xtest = test, ytest = test_labels, 
+      keep.forest = TRUE, ntree = ntrees)))
+  
+  # Create, print and record the confusion matrix
+  t <- rf_model$test$confusion
+  print(t)
+  results[[i]] <- t
+  
+  # Compute and save the success ratio
+  success <- c(success, sum(diag(t[, -11]))/sum(t[, -11]))
+  msg <- sprintf("Test %d: Percent predicted %5.1f%%\n", i, success[i]*100)
+  cat(msg, sep="")
+}
+
+# Plot the error rates vs. number of trees
+plot(rf_model, main = "Random Forest Error Rates vs. Tree Growth")
+
+# Report on the overall success percentage
+overall_success <- sum(success)/NROW(success)
+cat("Overall: ", round(overall_success*100, digits = 3), "% correctly predicted.\n", sep="")
+
+# Create the success map.
+key_results <- lapply(X=results, FUN = function(x) x[1:10,1:10])
+ghm_rf<- digit_model_heatmap(
+  key_results, "Random Forest", "binary data; ntrees = 385")
+ghm_rf
+
+#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# Plot the results of random forest
+
+# Create a data frame to hold parameters and results.
+model_variations <- data.frame(
+  datatype  = c("decimal", "decimal", "decimal", "binary", "binary", "binary"),
+  trees     = c(500, 350, 340, 500, 430, 385),
+  resultpct = c(0.915, 0.91571, 0.9143, 0.91857, 0.92, 0.91786))
+
+# Create a scatter plot of the results.
+g_rf <- 
+  ggplot(
+    data = model_variations,
+    mapping = aes(
+      x=trees, y=resultpct, 
+      label=round(resultpct*100, 2) %s+% "%", 
+      group=datatype, color=datatype, shape=datatype)) +
+  geom_point() +
+  geom_line(linetype = "dotted") +
+  geom_text(vjust = -2, size = 3) +
+  scale_color_brewer(palette = "Set1") +
+  scale_y_continuous(name = "Percent Correct", labels = scales::percent, limits = c(0.914, 0.921)) +
+  labs(
+    title = "Results of Random Forest Analysis",
+    subtitle = "Binary data models in red. Decimal data models in blue.",
+    x = "Maximum Number of Trees") +
+  theme(legend.title = element_blank())
+g_rf
+
+
+##-------------------------------------------------------------------------------------------------
+## FINALE - RUN THE WINNING ALGORITHM ACROSS THE PROVIDED TEST DATA
+##
+## Run an Naive Bayes analysis using binary factor pixel values on the test data.
+
+cat("FINALE: Pixel data as binary factors on supplied test data\n")
+
+# Perform a prediction with the test data
+svm_final_pred <- predict(svm_model, test_num, type = "class")
+final_df <- data.frame(digit = svm_final_pred, stringsAsFactors = FALSE)
+ghisto_final <- ggplot(data <- final_df, mapping = aes(x = digit)) +
+  stat_count(bins = 10, color="white", fill = "seagreen") +
+  # scale_x_discrete(name = "Digit Predicted", breaks = seq(from = 0, to = 9, by = 1)) +
+  labs(
+    title = "Prediction Volumes for the 999-element Test Data Set",
+    subtitle = "Using SVM with coef0 = 6000, c = 1",
+    y = "Prediction Volume")
+ghisto_final
